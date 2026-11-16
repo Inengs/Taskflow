@@ -3,6 +3,7 @@ package controllers
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -320,85 +321,225 @@ func DeleteTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Task deleted successfully"})
 }
 
-// UpdateTaskStatus changes only the status of a task
+// UpdateTaskStatus moves a task between kanban columns (and/or reorders it
+// within its current column). All position shifts in both the source and
+// destination columns happen in one transaction.
 //
-//	@Summary	Update task status
-//	@Tags		tasks
-//	@Accept		json
-//	@Produce	json
-//	@Security	SessionCookie
-//	@Param		id		path		int					true	"Task ID"
-//	@Param		request	body		models.StatusInput	true	"Status"
-//	@Success	200		{object}	map[string]any
-//	@Router		/tasks/{id}/status [patch]
+// Behavior:
+//
+//   - Any project member can move tasks.
+//
+//   - Cross-column move: close the gap in the source column, make room in the
+//     destination column, then update the task.
+//
+//   - Same-column reorder: shift the in-between tasks up or down by 1.
+//
+//   - If old and new (status, position) are identical, the request is a no-op.
+//
+//   - Activity is logged only when a task transitions INTO "done" — every
+//     column hop would be too noisy for the dashboard feed.
+//
+//     @Summary	Move task between columns
+//     @Tags		tasks
+//     @Accept		json
+//     @Produce	json
+//     @Security	BearerAuth
+//     @Param		id		path		int							true	"Task ID"
+//     @Param		request	body		UpdateTaskStatusInput		true	"New status + position"
+//     @Success	200		{object}	map[string]any
+//     @Failure	400		{object}	map[string]any
+//     @Failure	403		{object}	map[string]any
+//     @Failure	404		{object}	map[string]any
+//     @Router		/tasks/{id}/status [patch]
 func UpdateTaskStatus(c *gin.Context) {
-	db := c.MustGet("db").(*sql.DB) // Setup database connection
+	db := c.MustGet("db").(*sql.DB)
 
-	// Get user ID from session
-	userID, ok := c.Get("user_id")
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
 		return
 	}
-	userIDInt, _ := userID.(int)
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "PATCH /tasks/:id/status")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
 
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
-
+	taskID, err := strconv.Atoi(c.Param("id")) // get taskID from the params
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
 		return
 	}
 
-	var status models.StatusInput
-	if err := c.ShouldBindJSON(&status); err != nil {
+	var input models.UpdateTaskStatusInput
+	// Parse the JSON body into { status, position }
+	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-
-	validate := validator.New()
-	if err := validate.Struct(status); err != nil {
-		var errs []string
-		for _, err := range err.(validator.ValidationErrors) {
-			errs = append(errs, fmt.Sprintf("Field '%s' failed on '%s'", err.Field(), err.Tag()))
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"errors": errs})
+	if !validTaskStatuses[input.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid status: %q", input.Status)}) // catch invalid status
+		return
+	}
+	if input.Position < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Position must be >= 0"})
 		return
 	}
 
-	// Update task status in database
-	var task models.Task
-	err = db.QueryRow(
-		"UPDATE tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3 RETURNING id, user_id, project_id, title, description, status, created_at, updated_at",
-		status.Status, id, userIDInt,
-	).Scan(&task.ID, &task.UserID, &task.ProjectID, &task.Title, &task.Description, &task.Status, &task.CreatedAt, &task.UpdatedAt)
+	// Fetch the task's current state. We need the project_id (for the auth
+	// check), the old status and position (for the shift math), and the title
+	// (for the activity log on completion).
+	var projectID int    //  needed for RequireProjectRole (the auth check). The URL has no project_id — we resolve it from the task itself.
+	var oldStatus string // needed to know if this is a same-column reorder or cross-column move (the shift math differs).
+	var oldPosition int  // needed for the same-column shift math (range [new, old) or (old, new]).
+	var title string     // needed for the activity log if the task is being marked "done".
+
+	err = db.QueryRow(`
+		SELECT project_id, status, position, title FROM tasks WHERE id = $1`,
+		taskID,
+	).Scan(&projectID, &oldStatus, &oldPosition, &title)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Task with ID %d not found", id)})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		slog.Error("Failed to load task for status change",
+			"task_id", taskID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
 		return
 	}
 
-	// ─── Log activity with action based on new status ───
-	// "completed" reads better than "updated" when a task is marked done
-	action := "updated"
-	switch status.Status {
-	case "done":
-		action = "completed"
-	case "in-progress":
-		action = "started"
-	}
-	utils.LogActivity(db, userIDInt, "task", task.ID, action, task.Title, nil)
-
-	// Send notification and broadcast task
-	if err := SendNotification(db, userIDInt, fmt.Sprintf("Task status updated to %s: %s", task.Status, task.Title)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send notification"})
+	// Auth check on the task's project — not the URL. This is what makes the
+	// endpoint safe even though the URL has no project_id.
+	if _, err := utils.RequireProjectRole(db, projectID, uid, "member"); err != nil {
+		utils.RespondProjectAccessError(c, err)
 		return
 	}
-	manager.BroadcastTask(userIDInt, task, "task_updated")
 
-	// Return updated task
-	c.JSON(http.StatusOK, gin.H{"message": "Task status updated successfully", "task": task})
+	// No-op: nothing changed. Skip the transaction entirely.
+	if oldStatus == input.Status && oldPosition == input.Position {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "No change",
+			"task": gin.H{
+				"id":         taskID,
+				"status":     oldStatus,
+				"position":   oldPosition,
+				"updated_at": nil,
+			},
+		})
+		return
+	}
+
+	transaction, err := db.Begin()
+	if err != nil {
+		slog.Error("Failed to begin transaction", "task_id", taskID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+		return
+	}
+	defer transaction.Rollback() // no-op after Commit
+
+	if oldStatus == input.Status {
+		// ─── Same-column reorder ───
+		if input.Position < oldPosition {
+			// Moving UP: shift tasks in [new, old) down by 1 to make room.
+			// (Yes, "down by 1" = position+1, because lower position = higher
+			// on the board. Confusing naming, but the math is right.)
+			if _, err := transaction.Exec(`
+				UPDATE tasks SET position = position + 1
+				WHERE project_id = $1 AND status = $2
+				  AND position >= $3 AND position < $4`,
+				projectID, oldStatus, input.Position, oldPosition); err != nil {
+				slog.Error("Failed to shift tasks (same-column up)",
+					"task_id", taskID, "error", err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+				return
+			}
+		} else {
+			// Moving DOWN: shift tasks in (old, new] up by 1 to close the gap
+			// above the moved task.
+			if _, err := transaction.Exec(`
+				UPDATE tasks SET position = position - 1
+				WHERE project_id = $1 AND status = $2
+				  AND position > $3 AND position <= $4`,
+				projectID, oldStatus, oldPosition, input.Position); err != nil {
+				slog.Error("Failed to shift tasks (same-column down)",
+					"task_id", taskID, "error", err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+				return
+			}
+		}
+	} else {
+		// ─── Cross-column move ───
+		// Source column: close the gap left by the moved task.
+		if _, err := transaction.Exec(`
+			UPDATE tasks SET position = position - 1
+			WHERE project_id = $1 AND status = $2 AND position > $3`,
+			projectID, oldStatus, oldPosition); err != nil {
+			slog.Error("Failed to shift source column",
+				"task_id", taskID, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+			return
+		}
+		// Destination column: make room at the target position.
+		if _, err := transaction.Exec(`
+			UPDATE tasks SET position = position + 1
+			WHERE project_id = $1 AND status = $2 AND position >= $3`,
+			projectID, input.Status, input.Position); err != nil {
+			slog.Error("Failed to shift destination column",
+				"task_id", taskID, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+			return
+		}
+	}
+
+	// Finally, move the task itself.
+	var updatedAt sql.NullTime
+	err = transaction.QueryRow(`
+		UPDATE tasks SET status = $1, position = $2, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $3
+		RETURNING updated_at`,
+		input.Status, input.Position, taskID,
+	).Scan(&updatedAt)
+	if err != nil {
+		slog.Error("Failed to update task status",
+			"task_id", taskID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+		return
+	}
+
+	// Activity log — only when a task transitions INTO "done".
+	// Logging every column hop would flood the dashboard feed.
+	if input.Status == "done" && oldStatus != "done" {
+		if _, err := transaction.Exec(`
+			INSERT INTO activity_log (user_id, entity_type, entity_id, action, target)
+			VALUES ($1, 'task', $2, 'completed', $3)`,
+			uid, taskID, title); err != nil {
+			slog.Warn("Failed to log completion activity",
+				"task_id", taskID, "error", err.Error())
+			// Non-fatal: the move already happened.
+		}
+	}
+
+	if err := transaction.Commit(); err != nil {
+		slog.Error("Failed to commit status change",
+			"task_id", taskID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+		return
+	}
+
+	slog.Info("Task moved",
+		"user_id", uid, "task_id", taskID,
+		"from", fmt.Sprintf("%s@%d", oldStatus, oldPosition),
+		"to", fmt.Sprintf("%s@%d", input.Status, input.Position))
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Task moved",
+		"task": gin.H{
+			"id":         taskID,
+			"status":     input.Status,
+			"position":   input.Position,
+			"updated_at": updatedAt,
+		},
+	})
 }

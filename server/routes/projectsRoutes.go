@@ -15,6 +15,9 @@ func ProjectRoutes(router *gin.Engine) {
 		projects.POST("/", controllers.CreateProject)
 		projects.PUT("/:id", controllers.UpdateProject)
 		projects.DELETE("/:id", controllers.DeleteProject)
+
+		// Tasks scoped to a project (the kanban board's data source)
 		projects.GET("/:id/tasks", controllers.ListProjectTasks) // list every project tasks
+		projects.POST("/:id/tasks", controllers.CreateProjectTask)
 	}
 }

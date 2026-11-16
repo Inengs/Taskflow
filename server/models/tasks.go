@@ -29,3 +29,19 @@ type TaskInput struct {
 type StatusInput struct {
 	Status string `json:"status" binding:"required" validate:"required,oneof=pending in-progress done"`
 }
+
+// CreateProjectTaskInput is the request body for POST /projects/:id/tasks.
+type CreateProjectTaskInput struct {
+	Title       string     `json:"title" binding:"required" validate:"required,max=255"`
+	Description string     `json:"description"`
+	Status      string     `json:"status"`    // optional, defaults to "pending"
+	Priority    string     `json:"priority"`  // optional, defaults to "medium"
+	DueDate     *time.Time `json:"due_date"`  // optional, nullable
+	Assignees   []int      `json:"assignees"` // optional, list of user IDs
+}
+
+// UpdateTaskStatusInput is the request body for PATCH /tasks/:id/status.
+type UpdateTaskStatusInput struct {
+	Status   string `json:"status" binding:"required"`
+	Position int    `json:"position" binding:"required"`
+}
