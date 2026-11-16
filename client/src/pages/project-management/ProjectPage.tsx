@@ -1,6 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { useProject } from "../../hooks/useProject";
 import ProjectHeader from "./components/ProjectHeader";
+import ProjectBoard from "./components/ProjectBoard";
 
 export default function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -41,9 +42,7 @@ export default function ProjectPage() {
   return (
     <div className="space-y-6">
       <ProjectHeader project={project} />
-      <div className="py-20 text-sm text-center text-gray-400 border border-gray-200 border-dashed rounded-xl">
-        Tasks board coming next
-      </div>
+      <ProjectBoard projectId={project.id} />
     </div>
   );
 }

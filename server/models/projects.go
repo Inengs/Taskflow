@@ -42,3 +42,21 @@ type ProjectDetail struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 }
+
+// ProjectTask is one card on the board (GET /projects/:id/tasks).
+type ProjectTask struct {
+	ID           int             `json:"id"`
+	ProjectID    int             `json:"project_id"`
+	Title        string          `json:"title"`
+	Description  string          `json:"description"`
+	Status       string          `json:"status"` // pending | in-progress | in-review | done
+	Priority     string          `json:"priority"`
+	DueDate      *time.Time      `json:"due_date"`
+	Position     int             `json:"position"`
+	Assignees    []TaskUserBrief `json:"assignees"`
+	SubtaskTotal int             `json:"subtask_total"`
+	SubtaskDone  int             `json:"subtask_done"`
+	CommentCount int             `json:"comment_count"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}

@@ -1,5 +1,6 @@
 import api from "../axios/api";
 import type { Project, ProjectDetail, ProjectInput, ProjectListItem } from "../types/project";
+import type { ProjectTask } from "../types/task";
 
 export async function getProjects(): Promise<{ message: string; projects: ProjectListItem[] }> {
   // Trailing slash on purpose: the route is registered as "/", and without it
@@ -15,5 +16,12 @@ export async function createProject(input: ProjectInput): Promise<{ message: str
 
 export async function getProject(id: number): Promise<{ message: string; project: ProjectDetail }> {
   const { data } = await api.get(`/projects/${id}`); // no trailing slash on /:id routes
+  return data;
+}
+
+export async function getProjectTasks(
+  projectId: number
+): Promise<{ message: string; tasks: ProjectTask[]; truncated: boolean }> {
+  const { data } = await api.get(`/projects/${projectId}/tasks`);
   return data;
 }

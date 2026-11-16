@@ -15,5 +15,6 @@ func ProjectRoutes(router *gin.Engine) {
 		projects.POST("/", controllers.CreateProject)
 		projects.PUT("/:id", controllers.UpdateProject)
 		projects.DELETE("/:id", controllers.DeleteProject)
+		projects.GET("/:id/tasks", controllers.ListProjectTasks) // list every project tasks
 	}
 }
