@@ -43,5 +43,5 @@ type CreateProjectTaskInput struct {
 // UpdateTaskStatusInput is the request body for PATCH /tasks/:id/status.
 type UpdateTaskStatusInput struct {
 	Status   string `json:"status" binding:"required"`
-	Position int    `json:"position" binding:"required"`
+	Position int    `json:"position" binding:"min=0"`
 }

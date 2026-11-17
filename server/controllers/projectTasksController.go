@@ -263,10 +263,8 @@ func CreateProjectTask(c *gin.Context) {
 	}
 
 	// Deduplicate assignee IDs and exclude the creator (no self-assign).
-	// when looking to assign a task, the list you may get from the frontend, might have duplicates, you have to select all the ids
-	// without assigning to someone the same project twice, or assigning a project to yourself, since you are the one creating it
-	seen := map[int]bool{uid: true}                   // Creates a Go map (like a JavaScript object) that we'll use as a checklist to track which user IDs we've already processed, and pre-seeds it with the creator's ID marked as "already seen" so the creator gets automatically skipped when we loop through the assignee list.
-	requested := make([]int, 0, len(input.Assignees)) // creates an empty integer slice with length 0 but capacity pre-allocated to match the input size
+	seen := map[int]bool{}
+	requested := make([]int, 0, len(input.Assignees))
 	for _, id := range input.Assignees {
 		if id > 0 && !seen[id] {
 			seen[id] = true
@@ -278,13 +276,11 @@ func CreateProjectTask(c *gin.Context) {
 	// task to an outsider who has no business seeing it.
 	validAssignees := make([]int, 0, len(requested))
 	if len(requested) > 0 {
-		// Of these requested assignees, which ones are actually project members
 		rows, err := db.Query(`
 			SELECT user_id FROM project_members
 			WHERE project_id = $1 AND user_id = ANY($2::int[])`,
 			projectID, pq.Array(requested))
 		if err != nil {
-			// handle errors
 			slog.Error("Failed to validate assignee membership",
 				"project_id", projectID, "error", err.Error())
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
@@ -308,14 +304,13 @@ func CreateProjectTask(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
 			return
 		}
-		// Logs how many invalid assignees were silently dropped. useful for debugging
 		if dropped := len(requested) - len(validAssignees); dropped > 0 {
 			slog.Warn("Dropped non-member assignees",
 				"project_id", projectID, "dropped", dropped)
 		}
 	}
 
-	// Everything from here on must succeed or fail together. The whole task creation is atomic — either all of these succeed together, or none happen
+	// Everything from here on must succeed or fail together.
 	transaction, err := db.Begin()
 	if err != nil {
 		slog.Error("Failed to begin transaction", "project_id", projectID, "error", err.Error())
@@ -355,7 +350,6 @@ func CreateProjectTask(c *gin.Context) {
 
 	// 3. Insert assignees and fetch their username + avatar for the response.
 	if len(validAssignees) > 0 {
-		// One multi-row INSERT instead of N round trips.
 		values := make([]string, len(validAssignees))
 		args := make([]interface{}, 0, len(validAssignees)+1)
 		args = append(args, task.ID)
@@ -405,21 +399,17 @@ func CreateProjectTask(c *gin.Context) {
 		}
 	}
 
-	// 4. Log activity inside the transaction so it rolls back with the task.
-	if _, err := transaction.Exec(`
-		INSERT INTO activity_log (user_id, entity_type, entity_id, action, target)
-		VALUES ($1, 'task', $2, 'created', $3)`,
-		uid, task.ID, task.Title); err != nil {
-		slog.Warn("Failed to log activity", "task_id", task.ID, "error", err.Error())
-		// Non-fatal: the task is created, we just couldn't log it.
-	}
-
 	if err := transaction.Commit(); err != nil {
 		slog.Error("Failed to commit task creation",
 			"project_id", projectID, "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
 		return
 	}
+
+	// Side effects: strictly after commit, best-effort.
+	utils.LogActivity(db, uid, "task", task.ID, "created", task.Title, nil)
+
+	// TODO(notifications): notify assignees (never the creator) once the notification system is rebuilt.
 
 	slog.Info("Task created",
 		"user_id", uid, "project_id", projectID, "task_id", task.ID,

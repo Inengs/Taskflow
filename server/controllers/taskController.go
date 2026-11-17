@@ -390,10 +390,10 @@ func UpdateTaskStatus(c *gin.Context) {
 	// Fetch the task's current state. We need the project_id (for the auth
 	// check), the old status and position (for the shift math), and the title
 	// (for the activity log on completion).
-	var projectID int    //  needed for RequireProjectRole (the auth check). The URL has no project_id — we resolve it from the task itself.
-	var oldStatus string // needed to know if this is a same-column reorder or cross-column move (the shift math differs).
-	var oldPosition int  // needed for the same-column shift math (range [new, old) or (old, new]).
-	var title string     // needed for the activity log if the task is being marked "done".
+	var projectID int    // needed for RequireProjectRole. The URL has no project_id, so we resolve it from the task itself.
+	var oldStatus string // same-column reorder vs cross-column move
+	var oldPosition int  // same-column shift math
+	var title string     // activity log when the task is marked "done"
 
 	err = db.QueryRow(`
 		SELECT project_id, status, position, title FROM tasks WHERE id = $1`,
@@ -410,8 +410,7 @@ func UpdateTaskStatus(c *gin.Context) {
 		return
 	}
 
-	// Auth check on the task's project — not the URL. This is what makes the
-	// endpoint safe even though the URL has no project_id.
+	// Auth check on the task's project, not the URL.
 	if _, err := utils.RequireProjectRole(db, projectID, uid, "member"); err != nil {
 		utils.RespondProjectAccessError(c, err)
 		return
@@ -431,6 +430,9 @@ func UpdateTaskStatus(c *gin.Context) {
 		return
 	}
 
+	// Only a transition INTO "done" is logged; logging every column hop would flood the feed.
+	movedToDone := input.Status == "done" && oldStatus != "done"
+
 	transaction, err := db.Begin()
 	if err != nil {
 		slog.Error("Failed to begin transaction", "task_id", taskID, "error", err.Error())
@@ -442,9 +444,7 @@ func UpdateTaskStatus(c *gin.Context) {
 	if oldStatus == input.Status {
 		// ─── Same-column reorder ───
 		if input.Position < oldPosition {
-			// Moving UP: shift tasks in [new, old) down by 1 to make room.
-			// (Yes, "down by 1" = position+1, because lower position = higher
-			// on the board. Confusing naming, but the math is right.)
+			// Moving UP: shift tasks in [new, old) by +1 to make room.
 			if _, err := transaction.Exec(`
 				UPDATE tasks SET position = position + 1
 				WHERE project_id = $1 AND status = $2
@@ -456,8 +456,7 @@ func UpdateTaskStatus(c *gin.Context) {
 				return
 			}
 		} else {
-			// Moving DOWN: shift tasks in (old, new] up by 1 to close the gap
-			// above the moved task.
+			// Moving DOWN: shift tasks in (old, new] by -1 to close the gap.
 			if _, err := transaction.Exec(`
 				UPDATE tasks SET position = position - 1
 				WHERE project_id = $1 AND status = $2
@@ -508,24 +507,16 @@ func UpdateTaskStatus(c *gin.Context) {
 		return
 	}
 
-	// Activity log — only when a task transitions INTO "done".
-	// Logging every column hop would flood the dashboard feed.
-	if input.Status == "done" && oldStatus != "done" {
-		if _, err := transaction.Exec(`
-			INSERT INTO activity_log (user_id, entity_type, entity_id, action, target)
-			VALUES ($1, 'task', $2, 'completed', $3)`,
-			uid, taskID, title); err != nil {
-			slog.Warn("Failed to log completion activity",
-				"task_id", taskID, "error", err.Error())
-			// Non-fatal: the move already happened.
-		}
-	}
-
 	if err := transaction.Commit(); err != nil {
 		slog.Error("Failed to commit status change",
 			"task_id", taskID, "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
 		return
+	}
+
+	// Side effect: strictly after commit, best-effort.
+	if movedToDone {
+		utils.LogActivity(db, uid, "task", taskID, "completed", title, nil)
 	}
 
 	slog.Info("Task moved",
