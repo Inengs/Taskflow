@@ -45,3 +45,13 @@ type UpdateTaskStatusInput struct {
 	Status   string `json:"status" binding:"required"`
 	Position int    `json:"position" binding:"min=0"`
 }
+
+// UpdateTaskInput is the body for PUT /tasks/:id.
+// Assignees: nil = leave unchanged, [] = clear, [..] = replace the set.
+type UpdateTaskInput struct {
+	Title       string     `json:"title" validate:"required,max=255"`
+	Description string     `json:"description" validate:"max=10000"`
+	Priority    string     `json:"priority" validate:"required"`
+	DueDate     *time.Time `json:"due_date"` // null clears it
+	Assignees   *[]int     `json:"assignees"`
+}

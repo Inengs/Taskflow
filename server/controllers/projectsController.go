@@ -310,21 +310,31 @@ func CreateProject(c *gin.Context) {
 //	@Success	200		{object}	map[string]any
 //	@Failure	404		{object}	map[string]any
 //	@Router		/projects/{id} [put]
+//
+// UpdateProject handles PUT /projects/:id. Admin or owner only.
 func UpdateProject(c *gin.Context) {
 	db := c.MustGet("db").(*sql.DB)
 
-	// Get user ID from session
-	userID, ok := c.Get("user_id")
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
 		return
 	}
-	userIDInt, _ := userID.(int)
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "PUT /projects/:id")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
 
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
+	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+
+	if _, err := utils.RequireProjectRole(db, id, uid, "admin"); err != nil {
+		utils.RespondProjectAccessError(c, err)
 		return
 	}
 
@@ -333,39 +343,42 @@ func UpdateProject(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
 
-	validate := validator.New()
-	if err := validate.Struct(input); err != nil {
+	if err := projectValidator.Struct(input); err != nil {
 		var errs []string
-		for _, err := range err.(validator.ValidationErrors) {
-			errs = append(errs, fmt.Sprintf("Field '%s' failed on '%s'", err.Field(), err.Tag()))
+		for _, e := range err.(validator.ValidationErrors) {
+			errs = append(errs, fmt.Sprintf("Field '%s' failed on '%s'", e.Field(), e.Tag()))
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"errors": errs})
 		return
 	}
 
 	var project models.Project
-	err = db.QueryRow(
-		"UPDATE projects SET name = $1, description = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND user_id = $4 RETURNING id, user_id, name, description, created_at, updated_at",
-		input.Name, input.Description, id, userIDInt,
-	).Scan(&project.ID, &project.UserID, &project.Name, &project.Description, &project.CreatedAt, &project.UpdatedAt)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Project with ID %d not found", id)})
+	err = db.QueryRow(`
+		UPDATE projects
+		SET name = $1, description = $2, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $3
+		RETURNING id, user_id, name, description, created_at, updated_at`,
+		input.Name, input.Description, id,
+	).Scan(&project.ID, &project.UserID, &project.Name, &project.Description,
+		&project.CreatedAt, &project.UpdatedAt)
+	if err == sql.ErrNoRows { // deleted between the role check and now
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		slog.Error("Failed to update project", "project_id", id, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
 		return
 	}
 
-	// Send notification and broadcast project
-	if err := SendNotification(db, userIDInt, fmt.Sprintf("Project updated: %s", project.Name)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send notification"})
-		return
-	}
-	manager.BroadcastProject(userIDInt, project, "project_updated")
+	// TODO(notifications): notify members once the notification system is rebuilt.
+	// TODO(realtime): broadcast to the project room, not just the acting user.
+	manager.BroadcastProject(uid, project, "project_updated")
 
-	c.JSON(http.StatusOK, gin.H{"message": "Project updated successfully", "project": project})
+	c.JSON(http.StatusOK, gin.H{"message": "Project updated", "project": project})
 }
 
 // DeleteProject deletes a project and its tasks
@@ -378,69 +391,57 @@ func UpdateProject(c *gin.Context) {
 //	@Success	200	{object}	map[string]any
 //	@Failure	404	{object}	map[string]any
 //	@Router		/projects/{id} [delete]
+//
+// DeleteProject handles DELETE /projects/:id. Owner only.
+// Tasks, assignees, subtasks, comments and members go via ON DELETE CASCADE.
 func DeleteProject(c *gin.Context) {
 	db := c.MustGet("db").(*sql.DB)
 
-	// Get user ID from session
-	userID, ok := c.Get("user_id")
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
 		return
 	}
-	userIDInt, _ := userID.(int)
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "DELETE /projects/:id")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
 
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
+	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
 		return
 	}
 
-	// Fetch project for broadcasting
+	if _, err := utils.RequireProjectRole(db, id, uid, "owner"); err != nil {
+		utils.RespondProjectAccessError(c, err)
+		return
+	}
+
+	// One statement is atomic, so the project and everything under it go together.
 	var project models.Project
-	err = db.QueryRow(
-		"SELECT id, user_id, name, description, created_at, updated_at FROM projects WHERE id = $1 AND user_id = $2",
-		id, userIDInt,
-	).Scan(&project.ID, &project.UserID, &project.Name, &project.Description, &project.CreatedAt, &project.UpdatedAt)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Project with ID %d not found", id)})
+	err = db.QueryRow(`
+		DELETE FROM projects WHERE id = $1
+		RETURNING id, user_id, name, description, created_at, updated_at`, id,
+	).Scan(&project.ID, &project.UserID, &project.Name, &project.Description,
+		&project.CreatedAt, &project.UpdatedAt)
+	if err == sql.ErrNoRows { // already deleted
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		slog.Error("Failed to delete project", "project_id", id, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete project"})
 		return
 	}
 
-	// Delete associated tasks
-	_, err = db.Exec("DELETE FROM tasks WHERE project_id = $1 AND user_id = $2", id, userIDInt)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
+	utils.LogActivity(db, uid, "project", id, "deleted", project.Name, nil)
 
-	// Delete project
-	result, err := db.Exec("DELETE FROM projects WHERE id = $1 AND user_id = $2", id, userIDInt)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
+	// TODO(notifications): notify members once the notification system is rebuilt.
+	// TODO(realtime): broadcast to the project room, not just the acting user.
+	manager.BroadcastProject(uid, project, "project_deleted")
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Project with ID %d not found", id)})
-		return
-	}
-
-	// Send notification and broadcast project deletion
-	if err := SendNotification(db, userIDInt, fmt.Sprintf("Project deleted: %s", project.Name)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send notification"})
-		return
-	}
-	manager.BroadcastProject(userIDInt, project, "project_deleted")
-
-	c.JSON(http.StatusOK, gin.H{"message": "Project deleted successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "Project deleted"})
 }

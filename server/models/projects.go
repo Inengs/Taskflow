@@ -60,3 +60,11 @@ type ProjectTask struct {
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
+
+// ProjectMember is a member as shown in the members list and assignee picker.
+type ProjectMember struct {
+	ID        int    `json:"id"`
+	Username  string `json:"username"`
+	AvatarURL string `json:"avatar_url"`
+	Role      string `json:"role"`
+}

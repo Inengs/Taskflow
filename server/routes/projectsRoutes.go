@@ -19,5 +19,7 @@ func ProjectRoutes(router *gin.Engine) {
 		// Tasks scoped to a project (the kanban board's data source)
 		projects.GET("/:id/tasks", controllers.ListProjectTasks) // list every project tasks
 		projects.POST("/:id/tasks", controllers.CreateProjectTask)
+
+		projects.GET("/:id/members", controllers.ListProjectMembers)
 	}
 }
