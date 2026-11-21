@@ -21,5 +21,7 @@ func ProjectRoutes(router *gin.Engine) {
 		projects.POST("/:id/tasks", controllers.CreateProjectTask)
 
 		projects.GET("/:id/members", controllers.ListProjectMembers)
+
+		projects.POST("/:id/invitations", controllers.CreateProjectInvitation)
 	}
 }

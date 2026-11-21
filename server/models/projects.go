@@ -68,3 +68,19 @@ type ProjectMember struct {
 	AvatarURL string `json:"avatar_url"`
 	Role      string `json:"role"`
 }
+
+type ProjectInvitation struct {
+	ID        int       `json:"id"`
+	ProjectID int       `json:"project_id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	Status    string    `json:"status"`
+	InvitedBy *int      `json:"invited_by"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type CreateInvitationInput struct {
+	Email string `json:"email" validate:"required,email,max=255"`
+	Role  string `json:"role" validate:"omitempty,oneof=admin member"` // default: member
+}
