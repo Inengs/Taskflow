@@ -25,9 +25,9 @@ export default function ProfileDropdown() {
     }
 
     function handleLogout() {
-        setOpen(false); // close the dropdown when logging out
-        // TODO: clear auth token, redirect to login
-        navigate("/login"); // navigate to the login page after logging out
+        setOpen(false);
+        localStorage.removeItem("token");
+        window.location.href = "/login"; // full reload wipes in-memory auth state, same as the axios 401 interceptor
     }
 
     return (
