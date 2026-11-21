@@ -153,3 +153,65 @@ func CreateProjectInvitation(c *gin.Context) {
 	// TODO(notifications): email the invitee once the notification system is rebuilt.
 	c.JSON(http.StatusCreated, gin.H{"message": "Invitation created", "invitation": inv})
 }
+
+// ListProjectInvitations handles GET /projects/:id/invitations. Admin+ only.
+func ListProjectInvitations(c *gin.Context) {
+	db := c.MustGet("db").(*sql.DB)
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "GET /projects/:id/invitations")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	projectID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+
+	if _, err := utils.RequireProjectRole(db, projectID, uid, "admin"); err != nil {
+		utils.RespondProjectAccessError(c, err)
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT i.id, i.project_id, i.email, i.role, i.status, i.invited_by,
+		       i.created_at, i.expires_at, COALESCE(u.username, '')
+		FROM project_invitations i
+		LEFT JOIN users u ON u.id = i.invited_by
+		WHERE i.project_id = $1 AND i.status = 'pending' AND i.expires_at >= NOW()
+		ORDER BY i.created_at DESC, i.id DESC
+		LIMIT $2`, projectID, maxPendingInvitations)
+	if err != nil {
+		slog.Error("Failed to list invitations", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+		return
+	}
+	defer rows.Close()
+
+	invitations := []models.ProjectInvitationItem{} // [] not null when empty
+	for rows.Next() {
+		var inv models.ProjectInvitationItem
+		if err := rows.Scan(&inv.ID, &inv.ProjectID, &inv.Email, &inv.Role, &inv.Status,
+			&inv.InvitedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.InvitedByUsername); err != nil {
+			slog.Error("Failed to scan invitation", "project_id", projectID, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+			return
+		}
+		invitations = append(invitations, inv)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("Error iterating invitations", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitations fetched", "invitations": invitations})
+}

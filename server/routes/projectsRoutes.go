@@ -23,5 +23,7 @@ func ProjectRoutes(router *gin.Engine) {
 		projects.GET("/:id/members", controllers.ListProjectMembers)
 
 		projects.POST("/:id/invitations", controllers.CreateProjectInvitation)
+
+		projects.GET("/:id/invitations", controllers.ListProjectInvitations)
 	}
 }

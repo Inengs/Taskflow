@@ -84,3 +84,9 @@ type CreateInvitationInput struct {
 	Email string `json:"email" validate:"required,email,max=255"`
 	Role  string `json:"role" validate:"omitempty,oneof=admin member"` // default: member
 }
+
+// ProjectInvitationItem is an invitation as shown in the admin list.
+type ProjectInvitationItem struct {
+	ProjectInvitation
+	InvitedByUsername string `json:"invited_by_username"`
+}
