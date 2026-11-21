@@ -90,3 +90,14 @@ type ProjectInvitationItem struct {
 	ProjectInvitation
 	InvitedByUsername string `json:"invited_by_username"`
 }
+
+// MyInvitation is a pending invitation as seen by the invited user.
+type MyInvitation struct {
+	ID                int       `json:"id"`
+	ProjectID         int       `json:"project_id"`
+	ProjectName       string    `json:"project_name"`
+	Role              string    `json:"role"`
+	InvitedByUsername string    `json:"invited_by_username"`
+	CreatedAt         time.Time `json:"created_at"`
+	ExpiresAt         time.Time `json:"expires_at"`
+}

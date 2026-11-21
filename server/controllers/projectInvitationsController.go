@@ -268,3 +268,82 @@ func RevokeProjectInvitation(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Invitation revoked"})
 }
+
+// ListMyInvitations handles GET /invitations/mine.
+// Matches by the account's email, and only for verified emails.
+func ListMyInvitations(c *gin.Context) {
+	db := c.MustGet("db").(*sql.DB)
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "GET /invitations/mine")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	var email string
+	var verified bool
+	err := db.QueryRow(`
+		SELECT lower(email), COALESCE(verified, false) FROM users WHERE id = $1`, uid,
+	).Scan(&email, &verified)
+	if err != nil {
+		slog.Error("Failed to load user email", "user_id", uid, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+		return
+	}
+
+	invitations := []models.MyInvitation{} // [] not null when empty
+
+	// Unverified email: never match invitations (anyone can register with any address).
+	if !verified {
+		c.JSON(http.StatusOK, gin.H{
+			"message":        "Invitations fetched",
+			"email_verified": false,
+			"invitations":    invitations,
+		})
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT i.id, i.project_id, p.name, i.role, COALESCE(u.username, ''),
+		       i.created_at, i.expires_at
+		FROM project_invitations i
+		JOIN projects p ON p.id = i.project_id
+		LEFT JOIN users u ON u.id = i.invited_by
+		WHERE i.email = $1 AND i.status = 'pending' AND i.expires_at >= NOW()
+		ORDER BY i.created_at DESC, i.id DESC
+		LIMIT $2`, email, maxPendingInvitations)
+	if err != nil {
+		slog.Error("Failed to list my invitations", "user_id", uid, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var inv models.MyInvitation
+		if err := rows.Scan(&inv.ID, &inv.ProjectID, &inv.ProjectName, &inv.Role,
+			&inv.InvitedByUsername, &inv.CreatedAt, &inv.ExpiresAt); err != nil {
+			slog.Error("Failed to scan my invitation", "user_id", uid, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+			return
+		}
+		invitations = append(invitations, inv)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("Error iterating my invitations", "user_id", uid, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch invitations"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":        "Invitations fetched",
+		"email_verified": true,
+		"invitations":    invitations,
+	})
+}
