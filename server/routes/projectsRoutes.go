@@ -27,5 +27,7 @@ func ProjectRoutes(router *gin.Engine) {
 		projects.GET("/:id/invitations", controllers.ListProjectInvitations)
 
 		projects.DELETE("/:id/invitations/:invId", controllers.RevokeProjectInvitation)
+
+		projects.PATCH("/:id/members/:userId", controllers.UpdateProjectMemberRole)
 	}
 }

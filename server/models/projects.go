@@ -101,3 +101,9 @@ type MyInvitation struct {
 	CreatedAt         time.Time `json:"created_at"`
 	ExpiresAt         time.Time `json:"expires_at"`
 }
+
+// UpdateMemberRoleInput is the body for PATCH /projects/:id/members/:userId.
+// "owner" means: transfer ownership to this (admin) member.
+type UpdateMemberRoleInput struct {
+	Role string `json:"role"`
+}

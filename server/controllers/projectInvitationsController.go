@@ -20,6 +20,8 @@ var invitationValidator = validator.New()
 
 const maxPendingInvitations = 100 // per project; stops invite spam
 
+var errEmailNotVerified = errors.New("email not verified")
+
 // CreateProjectInvitation handles POST /projects/:id/invitations.
 // Admin+ can invite as member; only the owner can invite as admin.
 func CreateProjectInvitation(c *gin.Context) {
@@ -346,4 +348,190 @@ func ListMyInvitations(c *gin.Context) {
 		"email_verified": true,
 		"invitations":    invitations,
 	})
+}
+
+// verifiedUserEmail returns the user's lowercased email, or errEmailNotVerified.
+// Invitations are matched by email, so an unverified address must never match.
+func verifiedUserEmail(db *sql.DB, uid int) (string, error) {
+	var email string
+	var verified bool
+	if err := db.QueryRow(`
+		SELECT lower(email), COALESCE(verified, false) FROM users WHERE id = $1`, uid,
+	).Scan(&email, &verified); err != nil {
+		return "", err
+	}
+	if !verified {
+		return "", errEmailNotVerified
+	}
+	return email, nil
+}
+
+// AcceptInvitation handles POST /invitations/:id/accept.
+func AcceptInvitation(c *gin.Context) {
+	db := c.MustGet("db").(*sql.DB)
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "POST /invitations/:id/accept")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	invID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid invitation ID"})
+		return
+	}
+
+	email, err := verifiedUserEmail(db, uid)
+	if errors.Is(err, errEmailNotVerified) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Verify your email to respond to invitations"})
+		return
+	}
+	if err != nil {
+		slog.Error("Failed to load user email", "user_id", uid, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+
+	transaction, err := db.Begin()
+	if err != nil {
+		slog.Error("Failed to begin transaction", "invitation_id", invID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+	defer transaction.Rollback() // no-op after Commit
+
+	// Lock the row so two simultaneous accepts can't both proceed.
+	var projectID int
+	var invEmail, role, status string
+	var expired bool
+	err = transaction.QueryRow(`
+		SELECT project_id, email, role, status, expires_at < NOW()
+		FROM project_invitations WHERE id = $1 FOR UPDATE`, invID,
+	).Scan(&projectID, &invEmail, &role, &status, &expired)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
+		return
+	}
+	if err != nil {
+		slog.Error("Failed to load invitation", "invitation_id", invID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+	if invEmail != email { // not yours: same answer as "doesn't exist"
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
+		return
+	}
+	if status != "pending" {
+		c.JSON(http.StatusConflict, gin.H{"error": "Invitation is no longer pending"})
+		return
+	}
+	if expired {
+		c.JSON(http.StatusGone, gin.H{"error": "Invitation has expired"})
+		return
+	}
+
+	// Never overwrite an existing membership: an invite must not change a current role.
+	if _, err := transaction.Exec(`
+		INSERT INTO project_members (project_id, user_id, role)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (project_id, user_id) DO NOTHING`,
+		projectID, uid, role); err != nil {
+		slog.Error("Failed to add member", "project_id", projectID, "user_id", uid, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+
+	if _, err := transaction.Exec(`
+		UPDATE project_invitations SET status = 'accepted', responded_at = NOW()
+		WHERE id = $1`, invID); err != nil {
+		slog.Error("Failed to mark invitation accepted", "invitation_id", invID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+
+	var projectName, heldRole string
+	if err := transaction.QueryRow(`
+		SELECT p.name, pm.role
+		FROM projects p
+		JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
+		WHERE p.id = $1`, projectID, uid).Scan(&projectName, &heldRole); err != nil {
+		slog.Error("Failed to load project after accept", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+
+	if err := transaction.Commit(); err != nil {
+		slog.Error("Failed to commit accept", "invitation_id", invID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept invitation"})
+		return
+	}
+
+	utils.LogActivity(db, uid, "project", projectID, "joined", projectName, nil)
+	// TODO(notifications): tell the inviter once the notification system is rebuilt.
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Invitation accepted",
+		"project": gin.H{"id": projectID, "name": projectName},
+		"role":    heldRole,
+	})
+}
+
+
+// DeclineInvitation handles POST /invitations/:id/decline.
+func DeclineInvitation(c *gin.Context) {
+	db := c.MustGet("db").(*sql.DB)
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "POST /invitations/:id/decline")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	invID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid invitation ID"})
+		return
+	}
+
+	email, err := verifiedUserEmail(db, uid)
+	if errors.Is(err, errEmailNotVerified) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Verify your email to respond to invitations"})
+		return
+	}
+	if err != nil {
+		slog.Error("Failed to load user email", "user_id", uid, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline invitation"})
+		return
+	}
+
+	var declinedID int
+	err = db.QueryRow(`
+		UPDATE project_invitations
+		SET status = 'declined', responded_at = NOW()
+		WHERE id = $1 AND email = $2 AND status = 'pending'
+		RETURNING id`, invID, email).Scan(&declinedID)
+	if err == sql.ErrNoRows { // missing, not yours, or no longer pending
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
+		return
+	}
+	if err != nil {
+		slog.Error("Failed to decline invitation", "invitation_id", invID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline invitation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitation declined"})
 }
