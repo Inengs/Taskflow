@@ -61,51 +61,6 @@ func TaskListFunc(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Tasks retrieved successfully", "tasks": tasks})
 }
 
-// TaskDetailsFunc fetches one task by ID
-//
-//	@Summary	Task details
-//	@Tags		tasks
-//	@Produce	json
-//	@Security	SessionCookie
-//	@Param		id	path		int	true	"Task ID"
-//	@Success	200	{object}	map[string]any
-//	@Failure	404	{object}	map[string]any
-//	@Router		/tasks/{id} [get]
-func TaskDetailsFunc(c *gin.Context) {
-	db := c.MustGet("db").(*sql.DB) // Setup database connection
-
-	// Get user ID from session
-	userID, ok := c.Get("user_id")
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
-	userIDInt, _ := userID.(int)
-
-	// Extract and validate ID from URL parameter
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
-		return
-	}
-
-	// Query task by ID
-	var task models.Task
-	err = db.QueryRow("SELECT id, user_id, project_id, title, description, status, created_at, updated_at FROM tasks WHERE id = $1 AND user_id = $2", id, userIDInt).
-		Scan(&task.ID, &task.UserID, &task.ProjectID, &task.Title, &task.Description, &task.Status, &task.CreatedAt, &task.UpdatedAt)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Task with ID %d not found", id)})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-
-	// Return task details
-	c.JSON(http.StatusOK, gin.H{"message": "Task retrieved successfully", "task": task})
-}
 
 // CreateNewTask creates a task
 //

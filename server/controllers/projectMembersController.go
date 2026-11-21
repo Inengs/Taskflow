@@ -11,6 +11,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// memberRank mirrors the role hierarchy: member < admin < owner.
+func memberRank(role string) int {
+	switch role {
+	case "owner":
+		return 3
+	case "admin":
+		return 2
+	case "member":
+		return 1
+	}
+	return 0
+}
+
 // ListProjectMembers handles GET /projects/:id/members.
 // Any project member can see the member list (it feeds the assignee picker).
 func ListProjectMembers(c *gin.Context) {
@@ -73,7 +86,6 @@ func ListProjectMembers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Members fetched", "members": members})
 }
-
 
 // UpdateProjectMemberRole handles PATCH /projects/:id/members/:userId. Owner only.
 func UpdateProjectMemberRole(c *gin.Context) {
@@ -244,4 +256,151 @@ func UpdateProjectMemberRole(c *gin.Context) {
 		"message": "Role updated",
 		"member":  gin.H{"id": targetID, "role": input.Role},
 	})
+}
+
+// RemoveProjectMember handles DELETE /projects/:id/members/:userId.
+// Target == caller means "leave"; otherwise admin+ removes someone ranked below them.
+func RemoveProjectMember(c *gin.Context) {
+	db := c.MustGet("db").(*sql.DB)
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "DELETE /projects/:id/members/:userId")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	projectID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+	targetID, err := strconv.Atoi(c.Param("userId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+	leaving := targetID == uid
+
+	// Anyone in the project may leave; removing someone else needs admin+.
+	minRole := "member"
+	if !leaving {
+		minRole = "admin"
+	}
+	if _, err := utils.RequireProjectRole(db, projectID, uid, minRole); err != nil {
+		utils.RespondProjectAccessError(c, err)
+		return
+	}
+
+	transaction, err := db.Begin()
+	if err != nil {
+		slog.Error("Failed to begin transaction", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+	defer transaction.Rollback() // no-op after Commit
+
+	// Lock caller and target rows (fixed order) and re-check roles under the lock.
+	rows, err := transaction.Query(`
+		SELECT user_id, role FROM project_members
+		WHERE project_id = $1 AND user_id IN ($2, $3)
+		ORDER BY user_id
+		FOR UPDATE`, projectID, uid, targetID)
+	if err != nil {
+		slog.Error("Failed to lock member rows", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+	roles := map[int]string{}
+	for rows.Next() {
+		var id int
+		var role string
+		if err := rows.Scan(&id, &role); err != nil {
+			rows.Close()
+			slog.Error("Failed to scan member row", "project_id", projectID, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+			return
+		}
+		roles[id] = role
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		slog.Error("Error iterating member rows", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	callerRole, callerIsMember := roles[uid]
+	if !callerIsMember { // removed since the first check
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+	targetRole, targetIsMember := roles[targetID]
+	if !targetIsMember {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})
+		return
+	}
+
+	if leaving {
+		if callerRole == "owner" {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Owners can't leave. Transfer ownership or delete the project."})
+			return
+		}
+	} else {
+		if memberRank(callerRole) < memberRank("admin") { // demoted since the first check
+			c.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to do that"})
+			return
+		}
+		if targetRole == "owner" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "The owner can't be removed"})
+			return
+		}
+		if memberRank(callerRole) <= memberRank(targetRole) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "You can only remove members ranked below you"})
+			return
+		}
+	}
+
+	// Unassign them from this project's tasks so no ghost assignees remain.
+	if _, err := transaction.Exec(`
+		DELETE FROM task_assignees
+		WHERE user_id = $1
+		  AND task_id IN (SELECT id FROM tasks WHERE project_id = $2)`,
+		targetID, projectID); err != nil {
+		slog.Error("Failed to clear task assignments",
+			"project_id", projectID, "user_id", targetID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	if _, err := transaction.Exec(`
+		DELETE FROM project_members WHERE project_id = $1 AND user_id = $2`,
+		projectID, targetID); err != nil {
+		slog.Error("Failed to delete membership",
+			"project_id", projectID, "user_id", targetID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	if err := transaction.Commit(); err != nil {
+		slog.Error("Failed to commit member removal", "project_id", projectID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	// TODO(realtime): disconnect the removed user from the project room.
+	// TODO(notifications): tell the removed user once the notification system is rebuilt.
+	// No activity log: joins and leaves would add feed noise.
+
+	if leaving {
+		c.JSON(http.StatusOK, gin.H{"message": "You left the project"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Member removed"})
 }

@@ -55,3 +55,38 @@ type UpdateTaskInput struct {
 	DueDate     *time.Time `json:"due_date"` // null clears it
 	Assignees   *[]int     `json:"assignees"`
 }
+
+// TaskSubtask is a checklist item on a task.
+type TaskSubtask struct {
+	ID       int    `json:"id"`
+	Title    string `json:"title"`
+	Done     bool   `json:"done"`
+	Position int    `json:"position"`
+}
+
+// TaskDetail is the full task view for the detail drawer.
+// ProjectTask is embedded, so its fields (assignees, counts, dates) stay top-level in the JSON.
+type TaskDetail struct {
+	ProjectTask
+	ProjectName string         `json:"project_name"`
+	Creator     *TaskUserBrief `json:"creator"` // null if the creator's account was deleted
+	Subtasks    []TaskSubtask  `json:"subtasks"`
+	CanEdit     bool           `json:"can_edit"`
+	CanDelete   bool           `json:"can_delete"`
+}
+
+// TaskComment is one comment as shown in the task drawer.
+type TaskComment struct {
+	ID        int            `json:"id"`
+	Body      string         `json:"body"`
+	CreatedAt time.Time      `json:"created_at"`
+	EditedAt  *time.Time     `json:"edited_at"`
+	Author    *TaskUserBrief `json:"author"` // null if the author's account was deleted
+	CanEdit   bool           `json:"can_edit"`
+	CanDelete bool           `json:"can_delete"`
+}
+
+// CreateCommentInput is the body for POST /tasks/:id/comments and PUT /comments/:id.
+type CreateCommentInput struct {
+	Body string `json:"body" validate:"required,max=5000"`
+}

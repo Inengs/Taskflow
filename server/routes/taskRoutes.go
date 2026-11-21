@@ -10,10 +10,12 @@ func TaskRoutes(router *gin.Engine) {
 	tasks := router.Group("/tasks", middleware.AuthMiddleware())
 	{
 		tasks.GET("/", controllers.TaskListFunc)
-		tasks.GET("/:id", controllers.TaskDetailsFunc)
+		tasks.GET("/:id", controllers.GetTask)
 		tasks.POST("/", controllers.CreateNewTask)
 		tasks.PUT("/:id", controllers.UpdateTask)
 		tasks.DELETE("/:id", controllers.DeleteTask)
 		tasks.PATCH("/:id/status", controllers.UpdateTaskStatus)
+		tasks.GET("/:id/comments", controllers.ListTaskComments)
+		tasks.POST("/:id/comments", controllers.CreateTaskComment)
 	}
 }

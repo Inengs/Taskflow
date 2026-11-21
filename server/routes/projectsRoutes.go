@@ -29,5 +29,7 @@ func ProjectRoutes(router *gin.Engine) {
 		projects.DELETE("/:id/invitations/:invId", controllers.RevokeProjectInvitation)
 
 		projects.PATCH("/:id/members/:userId", controllers.UpdateProjectMemberRole)
+
+		projects.DELETE("/:id/members/:userId", controllers.RemoveProjectMember)
 	}
 }
