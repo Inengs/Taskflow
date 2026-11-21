@@ -215,3 +215,56 @@ func ListProjectInvitations(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Invitations fetched", "invitations": invitations})
 }
+
+// RevokeProjectInvitation handles DELETE /projects/:id/invitations/:invId. Admin+ only.
+func RevokeProjectInvitation(c *gin.Context) {
+	db := c.MustGet("db").(*sql.DB)
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+	uid, ok := userID.(int)
+	if !ok {
+		slog.Error("user_id in context is not an int", "endpoint", "DELETE /projects/:id/invitations/:invId")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	projectID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+		return
+	}
+	invID, err := strconv.Atoi(c.Param("invId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid invitation ID"})
+		return
+	}
+
+	if _, err := utils.RequireProjectRole(db, projectID, uid, "admin"); err != nil {
+		utils.RespondProjectAccessError(c, err)
+		return
+	}
+
+	// Scoped by project_id so an invitation from another project can't be touched via this URL.
+	var revokedID int
+	err = db.QueryRow(`
+		UPDATE project_invitations
+		SET status = 'revoked', responded_at = NOW()
+		WHERE id = $1 AND project_id = $2 AND status = 'pending'
+		RETURNING id`, invID, projectID).Scan(&revokedID)
+	if err == sql.ErrNoRows { // wrong ID, wrong project, or no longer pending
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found"})
+		return
+	}
+	if err != nil {
+		slog.Error("Failed to revoke invitation",
+			"project_id", projectID, "invitation_id", invID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke invitation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Invitation revoked"})
+}
