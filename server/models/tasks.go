@@ -90,3 +90,20 @@ type TaskComment struct {
 type CreateCommentInput struct {
 	Body string `json:"body" validate:"required,max=5000"`
 }
+
+// CreateSubtaskInput is the body for POST /tasks/:id/subtasks.
+type CreateSubtaskInput struct {
+	Title string `json:"title" validate:"required,max=255"`
+}
+
+// UpdateSubtaskInput is the body for PATCH /subtasks/:id. Omitted fields are unchanged.
+type UpdateSubtaskInput struct {
+	Title *string `json:"title"`
+	Done  *bool   `json:"done"`
+}
+
+// MyTask is a task on the "My Tasks" page: the board shape plus its project's name.
+type MyTask struct {
+	ProjectTask
+	ProjectName string `json:"project_name"`
+}

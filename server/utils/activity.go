@@ -38,3 +38,30 @@ func LogActivity(
 		)
 	}
 }
+
+// LogProjectActivity records activity scoped to a project, so every member's feed shows it.
+// Best-effort, like LogActivity: never fails the request.
+func LogProjectActivity(
+	db *sql.DB,
+	userID, projectID int,
+	entityType string,
+	entityID int,
+	action string,
+	target string,
+	metadata *string,
+) {
+	_, err := db.Exec(`
+        INSERT INTO activity_log (user_id, project_id, entity_type, entity_id, action, target, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, userID, projectID, entityType, entityID, action, target, metadata)
+	if err != nil {
+		slog.Error("Failed to log project activity",
+			"user_id", userID,
+			"project_id", projectID,
+			"entity_type", entityType,
+			"entity_id", entityID,
+			"action", action,
+			"error", err.Error(),
+		)
+	}
+}

@@ -42,7 +42,7 @@ func GetDashboardStats(c *gin.Context) {
 	COUNT(*) FILTER (WHERE status = 'done'), 
 	COUNT(*) FILTER (WHERE due_date IS NOT NULL AND due_date < NOW() AND status != 'done')
 	FROM tasks
-	WHERE user_id = $1	
+	WHERE project_id IN (SELECT project_id FROM project_members WHERE user_id = $1)	
 	`, uid).Scan(&stats.Total, &stats.InProgress, &stats.Completed, &stats.Overdue)
 	if err != nil {
 		slog.Error("Failed to query dashboard stats",
@@ -107,7 +107,7 @@ func computeDelta(previous, current int) int {
 	if previous == 0 {
 		return 0
 	}
-	return int((float64(current-previous) / float64(previous))) * 100
+	return int(float64(current-previous) / float64(previous) * 100)
 }
 
 // GetDashboardRecentTasks returns the 5 most recently created tasks for the user.
@@ -142,7 +142,7 @@ func GetDashboardRecentTasks(c *gin.Context) {
 	//   - "assignee" (u2) via tasks.assignee_id (LEFT JOIN because assignee can be NULL)
 	// COALESCE(t.priority, 'medium')  - defaults to medium when the column is showing null, this is for tasks that were created before we created the priority column
 	rows, err := db.Query(`
-		SELECT 
+		SELECT
 			t.id,
 			t.title,
 			t.status,
@@ -152,9 +152,15 @@ func GetDashboardRecentTasks(c *gin.Context) {
 			u1.id, u1.username, u1.avatar_url,
 			u2.id, u2.username, u2.avatar_url
 		FROM tasks t
+		INNER JOIN project_members pm ON pm.project_id = t.project_id AND pm.user_id = $1
 		INNER JOIN users u1 ON t.user_id = u1.id
-		LEFT JOIN users u2 ON t.assignee_id = u2.id
-		WHERE t.user_id = $1
+		LEFT JOIN LATERAL (
+			SELECT ta.user_id FROM task_assignees ta
+			WHERE ta.task_id = t.id
+			ORDER BY ta.assigned_at, ta.user_id
+			LIMIT 1
+		) fa ON true
+		LEFT JOIN users u2 ON u2.id = fa.user_id
 		ORDER BY t.created_at DESC
 		LIMIT 5
 	`, uid)
@@ -273,11 +279,11 @@ func GetDashboardProgress(c *gin.Context) {
 	// Single query — count total and completed in one round trip
 	var completed, total int
 	err := db.QueryRow(`
-        SELECT
-            COUNT(*) FILTER (WHERE status = 'done'),
-            COUNT(*)
-        FROM tasks
-        WHERE user_id = $1
+		SELECT
+			COUNT(*) FILTER (WHERE status = 'done'),
+			COUNT(*)
+		FROM tasks
+		WHERE project_id IN (SELECT project_id FROM project_members WHERE user_id = $1)
     `, uid).Scan(&completed, &total)
 	if err != nil {
 		slog.Error("Failed to query dashboard progress",
@@ -349,13 +355,13 @@ func GetDashboardTrend(c *gin.Context) {
 	// We use created_at as a proxy for "completed on" since we don't have a
 	// separate completed_at column. If you add completed_at later, switch to that.
 	rows, err := db.Query(`
-        SELECT DATE(created_at) AS day, COUNT(*)
-        FROM tasks
-        WHERE user_id = $1
-          AND status = 'done'
-          AND created_at >= NOW() - ($2 || ' days')::INTERVAL
-        GROUP BY day
-        ORDER BY day ASC
+		SELECT DATE(created_at) AS day, COUNT(*)
+		FROM tasks
+		WHERE project_id IN (SELECT project_id FROM project_members WHERE user_id = $1)
+		AND status = 'done'
+		AND created_at >= NOW() - ($2 || ' days')::INTERVAL
+		GROUP BY day
+		ORDER BY day ASC	
     `, uid, days)
 	if err != nil {
 		slog.Error("Failed to query dashboard trend",
@@ -464,15 +470,15 @@ func GetDashboardUpcoming(c *gin.Context) {
             COALESCE(t.priority, 'medium'),
             t.due_date,
             p.name AS project_name
-        FROM tasks t
-        LEFT JOIN projects p ON t.project_id = p.id
-        WHERE t.user_id = $1
-          AND t.due_date IS NOT NULL
-          AND t.due_date >= NOW()
-          AND t.due_date <= NOW() + ($2 || ' days')::INTERVAL
-          AND t.status != 'done'
-        ORDER BY t.due_date ASC
-        LIMIT 10
+			FROM tasks t
+			INNER JOIN projects p ON t.project_id = p.id
+			INNER JOIN project_members pm ON pm.project_id = t.project_id AND pm.user_id = $1
+			WHERE t.due_date IS NOT NULL
+			AND t.due_date >= NOW()
+			AND t.due_date <= NOW() + ($2 || ' days')::INTERVAL
+			AND t.status != 'done'
+			ORDER BY t.due_date ASC
+			LIMIT 10
     `, uid, days)
 	if err != nil {
 		slog.Error("Failed to query upcoming tasks",
@@ -569,19 +575,20 @@ func GetDashboardActivity(c *gin.Context) {
 
 	// Real activity_log query — JOIN users to get username + avatar_url
 	rows, err := db.Query(`
-        SELECT
-            a.id,
-            a.user_id,
-            u.username,
-            COALESCE(u.avatar_url, ''),
-            a.action,
-            a.target,
-            a.created_at
-        FROM activity_log a
-        INNER JOIN users u ON a.user_id = u.id
-        WHERE a.user_id = $1
-        ORDER BY a.created_at DESC
-        LIMIT $2
+		SELECT
+			a.id,
+			a.user_id,
+			u.username,
+			COALESCE(u.avatar_url, ''),
+			a.action,
+			a.target,
+			a.created_at
+		FROM activity_log a
+		INNER JOIN users u ON a.user_id = u.id
+		WHERE a.project_id IN (SELECT project_id FROM project_members WHERE user_id = $1)
+		OR (a.project_id IS NULL AND a.user_id = $1)
+		ORDER BY a.created_at DESC
+		LIMIT $2
     `, uid, limit)
 	if err != nil {
 		slog.Error("Failed to query activity log",

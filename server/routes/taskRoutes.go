@@ -17,5 +17,7 @@ func TaskRoutes(router *gin.Engine) {
 		tasks.PATCH("/:id/status", controllers.UpdateTaskStatus)
 		tasks.GET("/:id/comments", controllers.ListTaskComments)
 		tasks.POST("/:id/comments", controllers.CreateTaskComment)
+		tasks.POST("/:id/subtasks", controllers.CreateSubtask)
+		tasks.GET("/mine", controllers.ListMyTasks)
 	}
 }
