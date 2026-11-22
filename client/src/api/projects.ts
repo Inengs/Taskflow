@@ -1,6 +1,7 @@
 import api from "../axios/api";
-import type { Project, ProjectDetail, ProjectInput, ProjectListItem } from "../types/project";
-import type { ProjectTask } from "../types/task";
+import type { Project, ProjectDetail, ProjectInput, ProjectListItem, ProjectMember } from "../types/project";
+import type { ProjectTask, CreateTaskInput } from "../types/task";
+
 
 export async function getProjects(): Promise<{ message: string; projects: ProjectListItem[] }> {
   // Trailing slash on purpose: the route is registered as "/", and without it
@@ -23,5 +24,20 @@ export async function getProjectTasks(
   projectId: number
 ): Promise<{ message: string; tasks: ProjectTask[]; truncated: boolean }> {
   const { data } = await api.get(`/projects/${projectId}/tasks`);
+  return data;
+}
+
+export async function getProjectMembers(
+  projectId: number
+): Promise<{ message: string; members: ProjectMember[] }> {
+  const { data } = await api.get(`/projects/${projectId}/members`);
+  return data;
+}
+
+export async function createProjectTask(
+  projectId: number,
+  input: CreateTaskInput
+): Promise<{ message: string; task: ProjectTask }> {
+  const { data } = await api.post(`/projects/${projectId}/tasks`, input);
   return data;
 }

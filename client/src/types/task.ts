@@ -20,3 +20,13 @@ export interface ProjectTask {
   created_at: string;
   updated_at: string;
 }
+
+// Body for POST /projects/:id/tasks.
+export interface CreateTaskInput {
+  title: string;
+  description: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  due_date: string | null; // ISO string, or null for no due date
+  assignees: number[]; // user ids; must be project members
+}

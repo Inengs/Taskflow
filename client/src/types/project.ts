@@ -41,3 +41,11 @@ export interface ProjectDetail {
   created_at: string;
   updated_at: string;
 }
+
+// One row of GET /projects/:id/members (assignee picker, members list).
+export interface ProjectMember {
+  id: number;
+  username: string;
+  avatar_url: string;
+  role: ProjectRole;
+}
