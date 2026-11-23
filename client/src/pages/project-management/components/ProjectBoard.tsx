@@ -4,17 +4,30 @@ import { useProjectTasks } from "../../../hooks/useProjectTasks";
 import KanbanBoard from "./KanbanBoard";
 import type { TaskStatus } from "../../../types/task";
 import CreateTaskDrawer from "../CreateTaskDrawer";
+import { useMatch, useNavigate } from "react-router-dom";
+import TaskDetailDrawer from "../TaskDetailDrawer";
 
 interface ProjectBoardProps {
   projectId: number;
 }
 
 export default function ProjectBoard({ projectId }: ProjectBoardProps) {
-  const { tasks, truncated, loading, error, refetch, addTask, moveTask } = useProjectTasks(projectId);
-  const [query, setQuery] = useState("");
+  const { tasks, truncated, loading, error, refetch, addTask, moveTask, updateTask, removeTask } =
+    useProjectTasks(projectId);
+
+  const navigate = useNavigate();
+  const taskMatch = useMatch("/projects/:projectId/tasks/:taskId");
+  const openTaskId = taskMatch ? Number(taskMatch.params.taskId) : null;
+  const openTask = useCallback(
+    (id: number) => navigate(`/projects/${projectId}/tasks/${id}`),
+    [navigate, projectId]
+  );
+  const closeTask = useCallback(() => navigate(`/projects/${projectId}`), [navigate, projectId]);
+
   const [drawerStatus, setDrawerStatus] = useState<TaskStatus | null>(null); // null = closed
   const [notice, setNotice] = useState<string | null>(null);
 
+  const [query, setQuery] = useState("");
   const searching = query.trim() !== "";
 
   // Filtering happens in the browser: the endpoint returns the whole project.
@@ -112,6 +125,7 @@ export default function ProjectBoard({ projectId }: ProjectBoardProps) {
         dragDisabled={searching || truncated}
         onAddTask={setDrawerStatus}
         onMoveTask={handleMove}
+        onOpenTask={openTask}
       />
 
       {drawerStatus && (
@@ -122,6 +136,20 @@ export default function ProjectBoard({ projectId }: ProjectBoardProps) {
           onCreated={(task) => {
             addTask(task);
             setDrawerStatus(null);
+          }}
+        />
+      )}
+
+      {openTaskId !== null && Number.isFinite(openTaskId) && (
+        <TaskDetailDrawer
+          key={openTaskId}
+          projectId={projectId}
+          taskId={openTaskId}
+          onClose={closeTask}
+          onUpdated={updateTask}
+          onDeleted={(id) => {
+            removeTask(id);
+            closeTask();
           }}
         />
       )}

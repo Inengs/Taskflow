@@ -12,6 +12,7 @@ interface KanbanColumnProps {
   highlight: boolean; // a card is being dragged over this column
   dragDisabled: boolean;
   onAdd: () => void;
+  onOpenTask: (taskId: number) => void;
 }
 
 export default function KanbanColumn({
@@ -22,6 +23,7 @@ export default function KanbanColumn({
   highlight,
   dragDisabled,
   onAdd,
+  onOpenTask
 }: KanbanColumnProps) {
   // Makes the whole column a drop target, so empty columns and the space below the last card work.
   const { setNodeRef } = useDroppable({ id: status });
@@ -57,7 +59,7 @@ export default function KanbanColumn({
               No tasks
             </p>
           ) : (
-            tasks.map((t) => <SortableTaskCard key={t.id} task={t} disabled={dragDisabled} />)
+            tasks.map((t) => <SortableTaskCard key={t.id} task={t} disabled={dragDisabled} onOpen={() => onOpenTask(t.id)}/>)
           )}
         </SortableContext>
       </div>

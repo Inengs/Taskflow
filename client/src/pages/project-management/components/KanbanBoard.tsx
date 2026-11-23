@@ -24,9 +24,10 @@ interface KanbanBoardProps {
   dragDisabled: boolean;
   onAddTask: (status: TaskStatus) => void;
   onMoveTask: (taskId: number, status: TaskStatus, position: number) => void;
+  onOpenTask: (taskId: number) => void;
 }
 
-export default function KanbanBoard({ tasks, dragDisabled, onAddTask, onMoveTask }: KanbanBoardProps) {
+export default function KanbanBoard({ tasks, dragDisabled, onAddTask, onMoveTask, onOpenTask }: KanbanBoardProps) {
   const [activeId, setActiveId] = useState<number | null>(null);
   const [overStatus, setOverStatus] = useState<TaskStatus | null>(null);
 
@@ -122,6 +123,7 @@ export default function KanbanBoard({ tasks, dragDisabled, onAddTask, onMoveTask
             highlight={activeId !== null && overStatus === col.status}
             dragDisabled={dragDisabled}
             onAdd={() => onAddTask(col.status)}
+            onOpenTask={onOpenTask}
           />
         ))}
       </div>

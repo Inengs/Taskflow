@@ -86,5 +86,26 @@ export function useProjectTasks(projectId: number) {
     [resync]
   );
 
-  return { ...state, refetch, addTask, moveTask };
+    // Replace one task after it was edited in the drawer.
+  const updateTask = useCallback((task: ProjectTask) => {
+    setState((s) => ({ ...s, tasks: s.tasks.map((t) => (t.id === task.id ? task : t)) }));
+  }, []);
+
+  // Remove a deleted task and close the gap in its column, as the server does.
+  const removeTask = useCallback((taskId: number) => {
+    setState((s) => {
+      const gone = s.tasks.find((t) => t.id === taskId);
+      if (!gone) return s;
+      return {
+        ...s,
+        tasks: s.tasks
+          .filter((t) => t.id !== taskId)
+          .map((t) =>
+            t.status === gone.status && t.position > gone.position ? { ...t, position: t.position - 1 } : t
+          ),
+      };
+    });
+  }, []);
+  
+  return { ...state, refetch, addTask, moveTask, updateTask, removeTask };
 }
